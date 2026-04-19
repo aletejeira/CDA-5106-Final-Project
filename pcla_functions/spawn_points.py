@@ -11,7 +11,8 @@ def draw_spawn_points(world, life_time=20):
 
 
 # Connect to the client and retrieve the world object
-client = carla.Client('localhost', 2000)
+# client = carla.Client('localhost', 2000)
+client = carla.Client('172.17.112.1', 2000)
 world = client.get_world()
 
 # Set up the simulator in synchronous mode

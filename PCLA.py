@@ -31,6 +31,7 @@ from leaderboard_codes.carla_data_provider import CarlaDataProvider
 from leaderboard_codes.route_manipulation import interpolate_trajectory
 from leaderboard_codes.sensor_interface import CallBack, OpenDriveMapReader, SpeedometerReader
 
+
 class PCLA():
     def __init__(self, agent, vehicle, route, client):
         self.current_dir = os.path.dirname(os.path.abspath(__file__))

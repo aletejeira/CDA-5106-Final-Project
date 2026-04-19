@@ -8,6 +8,7 @@ import wandb
 import carla
 import random
 import string
+import cv2
 
 from torch.distributions.categorical import Categorical
 
@@ -16,6 +17,9 @@ from utils import visualize_obs
 
 from rails.models import EgoModel, CameraModel
 from waypointer import Waypointer
+
+from fault_injector import FaultInjector
+
 
 def get_entry_point():
     return 'ImageAgent'
@@ -33,6 +37,8 @@ class ImageAgent(AutonomousAgent):
 
         self.track = Track.SENSORS
         self.num_frames = 0
+        self.video_writer = None
+        self.video_path = os.path.abspath('camera_view.mp4')
 
         config_dir = os.path.dirname(os.path.abspath(path_to_conf_file))
 
@@ -77,6 +83,11 @@ class ImageAgent(AutonomousAgent):
         self.stop_counter = 0
 
     def destroy(self):
+        # Release video writer
+        if self.video_writer is not None:
+            self.video_writer.release()
+            print(f"Camera video saved to {self.video_path}")
+        
         if len(self.vizs) == 0:
             return
 
@@ -118,11 +129,61 @@ class ImageAgent(AutonomousAgent):
         wide_rgbs = []
         for i in range(3):
             _, wide_rgb = input_data.get(f'Wide_RGB_{i}')
+
             wide_rgb_crop = wide_rgb[self.wide_crop_top:,:,:3]
+
+            # # Optional fault injection: if main attaches `self.rectangle_mask_fault`,
+            # # apply it to the center wide camera (Wide_RGB_1).
+            # if i == 1 and getattr(self, 'rectangle_mask_fault', None) is not None:
+            #     wide_rgb_crop = self.rectangle_mask_fault.inject(wide_rgb_crop)
+            if (
+                i == 1
+                and getattr(self, 'rectangle_mask_fault', None) is not None
+                and timestamp >= 5.0
+            ):
+                wide_rgb_crop = self.rectangle_mask_fault.inject(wide_rgb_crop)
+            #########################################################################
+            if i == 1 and getattr(self, 'gaussian_noise_fault', None) is not None and timestamp >= 5.0:
+                wide_rgb_crop = self.gaussian_noise_fault.inject(wide_rgb_crop)
+            ############################################################################
+
+            # BLACKOUT INJECTION FAULT: The blackout starts after 5 seconds, lasts for 10 seconds, then is camera goes back to normal.
+            # if (i == 1 and getattr(self, 'blackout_fault', None) is not None and timestamp >= 5.0 and timestamp < 15.0):
+            #     wide_rgb_crop = self.blackout_fault.inject(wide_rgb_crop)
+
+            # BLACKOUT INJECTION FAULT: The blackout starts after 5 seconds, lasts for 5 seconds, then is camera goes back to normal for 5 seconds, blackout again. Repeat for the rest of experiment.
+           # 5s delay, then 5s blackout / 5s normal repeating
+            start_time = 5.0
+            blackout_on = 5.0
+            blackout_off = 5.0
+            cycle = blackout_on + blackout_off
+
+            t = timestamp - start_time
+            blackout_active = (t >= 0.0) and ((t % cycle) < blackout_on)
+
+            if i == 1 and getattr(self, 'blackout_fault', None) is not None and blackout_active:
+                wide_rgb_crop = self.blackout_fault.inject(wide_rgb_crop)
+
+
+
             _wide_rgb = wide_rgb_crop[...,::-1].copy()
             wide_rgbs.append(_wide_rgb)
 
         wide_rgbs_con = np.concatenate([wide_rgbs[0],wide_rgbs[1],wide_rgbs[2]], axis=1)
+
+        if self.video_writer is None:
+            h, w = wide_rgbs_con.shape[:2]
+            self.video_writer = cv2.VideoWriter(
+                self.video_path,
+                cv2.VideoWriter_fourcc(*'mp4v'),
+                20,
+                (w, h),
+            )
+
+        if self.video_writer is not None and self.video_writer.isOpened():
+            frame_bgr = cv2.cvtColor(wide_rgbs_con, cv2.COLOR_RGB2BGR)
+            self.video_writer.write(frame_bgr)
+
         wide_rgbs_ = torch.tensor(wide_rgbs_con[None]).float().permute(0,3,1,2).to(self.device)
         
         
@@ -140,6 +201,10 @@ class ImageAgent(AutonomousAgent):
         _, ego = input_data.get('EGO')
         _, gps = input_data.get('GPS')
 
+        # # Inject GNSS drift fault (Does this go here?)
+        # if getattr(self, 'gnss_drift_fault', None) is not None and timestamp >= 5.0:
+        #     gps = self.gnss_drift_fault.inject(gps)
+
 
         if self.waypointer is None:
             self.waypointer = Waypointer(self._global_plan, gps)
@@ -147,7 +212,11 @@ class ImageAgent(AutonomousAgent):
         _, _, cmd = self.waypointer.tick(gps)
 
         spd = ego.get('speed')
-        
+
+        # # Inject Speedometer bias fault
+        # if hasattr(self, 'speed_bias_fault') and timestamp >= 5.0:
+        #     spd = self.speed_bias_fault.inject(spd)
+
         cmd_value = cmd.value-1
         cmd_value = 3 if cmd_value < 0 else cmd_value
 
@@ -187,10 +256,10 @@ class ImageAgent(AutonomousAgent):
 
         steer, throt, brake = self.post_process(steer, throt, brake_prob, spd, cmd_value)
 
-        
         #rgb = np.concatenate([wide_rgb, narr_rgb[...,:3]], axis=1)
         
         #self.vizs.append(visualize_obs(rgb, 0, (steer, throt, brake), spd, cmd=cmd_value+1))
+
 
         if len(self.vizs) > 1000:
             self.flush_data()
